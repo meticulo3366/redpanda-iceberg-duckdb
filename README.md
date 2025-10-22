@@ -91,7 +91,7 @@
 
 ## 🎯 What This Demo Shows
 
-This project demonstrates a **production-ready lakehouse architecture** solving real-world data challenges:
+This project demonstrates a **streaming lakehouse architecture** solving real-world data challenges:
 
 ### Real-World Use Case
 Ingest raw financial trade data → Store in cost-efficient lakehouse → Run analytical queries → Publish insights for real-time monitoring dashboards, alerting systems, and downstream microservices.
