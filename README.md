@@ -142,8 +142,6 @@ Ingest raw financial trade data → Store in cost-efficient lakehouse → Run an
 Run the complete pipeline with one command:
 
 ```bash
-cd rp-e2e-nospark
-
 # Build the duckdb-cli container (required for Python integration)
 docker compose build duckdb-cli
 
@@ -180,7 +178,6 @@ Services are still running. To clean up, run: docker compose down -v
 
 #### 1. Build and Start Services
 ```bash
-cd rp-e2e-nospark
 
 # Build the duckdb-cli container
 docker compose build duckdb-cli
@@ -240,7 +237,7 @@ docker compose exec redpanda rpk topic consume trade_analytics --num 8 --format 
 ## 📁 Project Structure
 
 ```
-rp-e2e-nospark/
+redpanda-iceberg-duckdb/
 ├── docker-compose.yml              # Services orchestration
 ├── README.md                       # This file
 ├── validation/
@@ -315,7 +312,7 @@ ts_event    TIMESTAMP   -- Event timestamp (microsecond precision)
 
 ### Watch Committer Logs
 ```bash
-docker logs -f rp-e2e-nospark-committer-1
+docker logs -f redpanda-iceberg-duckdb-committer-1
 
 # Look for:
 # ✓ "Found X new files to process"
@@ -389,7 +386,7 @@ This is a known macOS Docker Desktop issue with stale network references.
 
 **Check S3 staging files:**
 ```bash
-docker exec rp-e2e-nospark-committer-1 python3 -c "
+docker exec redpanda-iceberg-duckdb-committer-1 python3 -c "
 import boto3
 s3 = boto3.client('s3',
     endpoint_url='http://minio:9000',
@@ -402,7 +399,7 @@ print(f'Found {len(resp.get(\"Contents\", []))} NDJSON files')
 
 **Check Parquet files:**
 ```bash
-docker exec rp-e2e-nospark-committer-1 python3 -c "
+docker exec redpanda-iceberg-duckdb-committer-1 python3 -c "
 import s3fs
 fs = s3fs.S3FileSystem(key='minioadmin', secret='minioadmin',
     client_kwargs={'endpoint_url': 'http://minio:9000'})
