@@ -1,6 +1,6 @@
 # Redpanda → Iceberg → DuckDB → Redpanda: Complete Lakehouse Pipeline
 
-> **A fully Dockerized, Spark-free streaming data pipeline** demonstrating the complete round-trip from Kafka to Iceberg lakehouse and back to Kafka for real-time analytics.
+> **A fully Dockerized streaming data pipeline** demonstrating the complete round-trip from Kafka to Iceberg lakehouse and back to Kafka for real-time analytics.
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
 [![Tested](https://img.shields.io/badge/e2e%20test-passing-brightgreen)](./validation/e2e.sh)
