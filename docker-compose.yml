@@ -1,0 +1,247 @@
+version: '3.8'
+
+services:
+  # Redpanda broker
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
+    platform: linux/amd64
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --default-log-level=info
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "18082:18082"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    networks:
+      - lakehouse
+
+  # Redpanda Console
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.5.2
+    platform: linux/amd64
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - lakehouse
+
+  # MinIO S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    platform: linux/amd64
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_REGION: us-east-1
+      MINIO_DOMAIN: minio
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      lakehouse:
+        aliases:
+          - lake.minio
+    volumes:
+      - minio_data:/data
+
+  # MinIO bucket initialization
+  minio-init:
+    image: minio/mc:latest
+    platform: linux/amd64
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing myminio/lake;
+      mc anonymous set public myminio/lake;
+      echo 'Bucket created successfully';
+      "
+    networks:
+      - lakehouse
+
+  # Tabular Iceberg REST catalog
+  catalog:
+    image: tabulario/iceberg-rest:latest
+    platform: linux/amd64
+    ports:
+      - "8181:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://lake/warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH-STYLE-ACCESS=true
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - lakehouse
+
+  # Committer service (NDJSON -> Parquet -> Iceberg)
+  committer:
+    build:
+      context: ./committer
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    ports:
+      - "8088:8088"
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: lake
+      MINIO_REGION: us-east-1
+      CATALOG_URI: http://catalog:8181
+      ICEBERG_WAREHOUSE: s3://lake/warehouse
+      ICEBERG_TABLE: analytics.trades_iceberg
+      PARQUET_TARGET_PREFIX: warehouse/analytics/trades_iceberg/data
+      PARQUET_ROW_GROUP: 50000
+      COMMITTER_PORT: 8088
+      POLL_INTERVAL: 10
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      catalog:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lakehouse
+
+  # Producer (generates deterministic trade data)
+  producer:
+    build:
+      context: ./redpanda
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      BROKER: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - lakehouse
+    profiles:
+      - manual
+
+  # Redpanda Connect (Benthos)
+  connect:
+    image: docker.redpanda.com/redpandadata/connect:latest
+    platform: linux/amd64
+    command: ["-c", "/config/s3_stage_and_commit.yaml"]
+    volumes:
+      - ./connect:/config:ro
+    environment:
+      RP_BROKERS: redpanda:9092
+      RP_TOPIC_TRADES: trades
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: lake
+      MINIO_REGION: us-east-1
+      COMMITTER_PORT: 8088
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      committer:
+        condition: service_healthy
+    networks:
+      - lakehouse
+    profiles:
+      - manual
+
+  # DuckDB CLI with Web UI
+  duckdb-cli:
+    build:
+      context: ./duckdb-ui
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    working_dir: /workspace
+    ports:
+      - "4213:4213"
+    volumes:
+      - ./duckdb:/workspace/duckdb:ro
+      - duckdb_data:/root/.duckdb
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: lake
+      CATALOG_URI: http://catalog:8181
+      ICEBERG_WAREHOUSE: s3://lake/warehouse
+      ICEBERG_TABLE: analytics.trades_iceberg
+      BATCH_COUNT: 50000
+      STAGE_PREFIX: staging/trades
+    command:
+      - /bin/sh
+      - -c
+      - |
+        # Install DuckDB extensions
+        echo "Installing DuckDB extensions..."
+        duckdb -c "INSTALL httpfs; INSTALL iceberg;"
+        echo "✓ DuckDB extensions installed"
+
+        echo ""
+        echo "=========================================="
+        echo "DuckDB CLI container is ready"
+        echo "Execute queries with:"
+        echo "  docker exec rp-e2e-nospark-duckdb-cli-1 duckdb [options]"
+        echo "=========================================="
+        echo ""
+
+        # Keep container alive
+        tail -f /dev/null
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      catalog:
+        condition: service_started
+    networks:
+      - lakehouse
+
+networks:
+  lakehouse:
+    driver: bridge
+
+volumes:
+  minio_data:
+  duckdb_data:

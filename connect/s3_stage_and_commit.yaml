@@ -1,0 +1,44 @@
+# Redpanda Connect pipeline: Kafka -> S3 (NDJSON)
+# Committer polls S3 for new files
+# Compatible with Redpanda Connect 4.67.5+
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - ${RP_BROKERS}
+    topics:
+      - ${RP_TOPIC_TRADES}
+    consumer_group: iceberg_sink_group_v4
+    start_from_oldest: true
+    checkpoint_limit: 1000
+    tls:
+      enabled: false
+
+# Output to S3 only
+output:
+  aws_s3:
+    bucket: ${MINIO_BUCKET}
+    path: staging/trades/${!timestamp_unix_nano()}.ndjson
+    batching:
+      count: 10000
+      period: 30s
+      processors:
+        - archive:
+            format: lines
+    endpoint: ${MINIO_ENDPOINT}
+    region: ${MINIO_REGION}
+    force_path_style_urls: true
+    credentials:
+      id: ${MINIO_ACCESS_KEY}
+      secret: ${MINIO_SECRET_KEY}
+    max_in_flight: 1
+    timeout: 30s
+
+metrics:
+  prometheus:
+    push_interval: 10s
+
+logger:
+  level: INFO
+  format: json
+  add_timestamp: true
