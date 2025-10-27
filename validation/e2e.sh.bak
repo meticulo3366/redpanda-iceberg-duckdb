@@ -30,24 +30,9 @@ sleep 20
 echo "Checking service health..."
 docker compose ps
 
-# Check if bootstrap was successful
-echo ""
-echo "Step 2: Verifying Polaris bootstrap completed..."
-if docker compose ps polaris-bootstrap 2>/dev/null | grep -q "exited (0)"; then
-    echo "✓ Polaris database bootstrap completed successfully"
-else
-    echo "⚠ Checking bootstrap logs for status..."
-    docker compose logs polaris-bootstrap | tail -20
-fi
-
-# Set up Polaris catalog
-echo ""
-echo "Step 3: Setting up Polaris catalog (warehouse, RBAC)..."
-docker compose exec -T duckdb-cli bash /workspace/resources/setup_polaris_catalog.sh
-
 # Create topics with Iceberg mode
 echo ""
-echo "Step 4: Creating Redpanda topic with Iceberg mode..."
+echo "Step 2: Creating Redpanda topic with Iceberg mode..."
 docker compose exec -T redpanda rpk topic create trades \
     --partitions 1 \
     --replicas 1 \
@@ -63,10 +48,9 @@ docker compose exec -T redpanda rpk topic create trade_analytics \
 
 # Register schemas for both topics
 echo ""
-echo "Step 5: Registering JSON schemas for Iceberg topics..."
-docker compose exec -T redpanda bash -c 'cat > /tmp/trades-schema.json <<'\''EOF'\''
+echo "Step 3: Registering JSON schemas for Iceberg topics..."
+docker compose exec -T redpanda bash -c 'cat <<EOF | rpk registry schema create trades-value --schema /dev/stdin --type json
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
     "trade_id": {"type": "string"},
@@ -74,18 +58,16 @@ docker compose exec -T redpanda bash -c 'cat > /tmp/trades-schema.json <<'\''EOF
     "price": {"type": "number"},
     "qty": {"type": "integer"},
     "side": {"type": "string"},
-    "ts_event": {"type": "string", "format": "date-time"},
-    "notes": {"type": "string"}
+    "ts_event": {"type": "string", "format": "date-time"}
   },
   "required": ["trade_id", "symbol", "price", "qty", "side", "ts_event"]
 }
 EOF
-rpk registry schema create trades-value --schema /tmp/trades-schema.json --type json'
+'
 
 # Register schema for analytics topic
-docker compose exec -T redpanda bash -c 'cat > /tmp/analytics-schema.json <<'\''EOF'\''
+docker compose exec -T redpanda bash -c 'cat <<EOF | rpk registry schema create trade_analytics-value --schema /dev/stdin --type json
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
     "symbol": {"type": "string"},
@@ -102,23 +84,38 @@ docker compose exec -T redpanda bash -c 'cat > /tmp/analytics-schema.json <<'\''
   "required": ["symbol", "trade_count", "avg_price", "total_volume"]
 }
 EOF
-rpk registry schema create trade_analytics-value --schema /tmp/analytics-schema.json --type json'
+'
 
-# Produce data (20k records with padding should exceed 1MB threshold)
+# Produce data
 echo ""
-echo "Step 6: Producing trade data (20,000 records with padding to exceed 1MB threshold)..."
+echo "Step 4: Producing trade data..."
 docker run --rm \
     --network redpanda-iceberg-duckdb_lakehouse \
     redpanda-iceberg-duckdb-producer \
     --brokers redpanda:9092 \
     --topic trades \
-    --count 20000 \
+    --count 10000 \
     --seed 42
 
-# Wait for Iceberg snapshot (need more time for large datasets and uploads)
+# Wait for Iceberg snapshot (default is 10 seconds)
 echo ""
-echo "Step 7: Waiting for Parquet file creation and S3 upload (60 seconds)..."
-sleep 60
+echo "Step 5: Waiting for Iceberg snapshot creation (15 seconds)..."
+sleep 15
+
+# Check if bootstrap was successful
+echo ""
+echo "Step 6: Verifying Polaris bootstrap completed..."
+if docker compose ps polaris-bootstrap 2>/dev/null | grep -q "exited (0)"; then
+    echo "✓ Polaris database bootstrap completed successfully"
+else
+    echo "⚠ Checking bootstrap logs for status..."
+    docker compose logs polaris-bootstrap | tail -20
+fi
+
+# Set up Polaris catalog
+echo ""
+echo "Step 7: Setting up Polaris catalog (warehouse, RBAC)..."
+docker compose exec -T duckdb-cli bash /workspace/resources/setup_polaris_catalog.sh
 
 # Generate DuckDB init script with token
 echo ""
@@ -128,7 +125,7 @@ docker compose exec -T duckdb-cli /workspace/duckdb/get_token.sh
 # Verify Iceberg table with DuckDB
 echo ""
 echo "Step 9: Querying Iceberg table with DuckDB..."
-docker compose exec -T duckdb-cli duckdb -init /tmp/init-env.sql -c ".read /workspace/duckdb/verify_iceberg.sql"
+docker compose exec -T duckdb-cli duckdb -init /workspace/duckdb/init-env.sql -c ".read /workspace/duckdb/verify_iceberg.sql"
 
 # Query Iceberg with DuckDB and publish results back to Redpanda
 echo ""
@@ -155,7 +152,7 @@ sleep 15
 # Query the analytics Iceberg table to complete the cycle
 echo ""
 echo "Step 13: Querying analytics Iceberg table (completing bidirectional flow)..."
-docker compose exec -T duckdb-cli duckdb -init /tmp/init-env.sql -c "
+docker compose exec -T duckdb-cli duckdb -init /workspace/duckdb/init-env.sql -c "
 SELECT
     'Analytics Iceberg Table' as source,
     COUNT(*) as symbol_count,
@@ -165,7 +162,7 @@ FROM iceberg_catalog.redpanda.trade_analytics;
 
 echo ""
 echo "Step 14: Showing analytics data from Iceberg table..."
-docker compose exec -T duckdb-cli duckdb -init /tmp/init-env.sql -c "
+docker compose exec -T duckdb-cli duckdb -init /workspace/duckdb/init-env.sql -c "
 SELECT
     symbol,
     trade_count,
@@ -179,7 +176,7 @@ LIMIT 5;
 # Show summary of both Iceberg tables
 echo ""
 echo "Step 15: Summary of Iceberg tables..."
-docker compose exec -T duckdb-cli duckdb -init /tmp/init-env.sql -c "
+docker compose exec -T duckdb-cli duckdb -init /workspace/duckdb/init-env.sql -c "
 SELECT
     'Trades Table' as table_name,
     'Total Records' as metric,

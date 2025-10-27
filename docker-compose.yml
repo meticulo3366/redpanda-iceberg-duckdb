@@ -1,56 +1,6 @@
 version: '3.8'
 
 services:
-  # Redpanda broker
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
-    platform: linux/amd64
-    command:
-      - redpanda
-      - start
-      - --smp=1
-      - --memory=1G
-      - --reserve-memory=0M
-      - --overprovisioned
-      - --node-id=0
-      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
-      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
-      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
-      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
-      - --rpc-addr=redpanda:33145
-      - --advertise-rpc-addr=redpanda:33145
-      - --mode=dev-container
-      - --default-log-level=info
-    ports:
-      - "19092:19092"
-      - "18081:18081"
-      - "18082:18082"
-      - "9644:9644"
-    healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
-      interval: 5s
-      timeout: 10s
-      retries: 10
-    networks:
-      - lakehouse
-
-  # Redpanda Console
-  console:
-    image: docker.redpanda.com/redpandadata/console:v2.5.2
-    platform: linux/amd64
-    ports:
-      - "8080:8080"
-    environment:
-      KAFKA_BROKERS: redpanda:9092
-      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
-      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
-    depends_on:
-      redpanda:
-        condition: service_healthy
-    networks:
-      - lakehouse
-
   # MinIO S3-compatible storage
   minio:
     image: minio/minio:latest
@@ -72,7 +22,7 @@ services:
     networks:
       lakehouse:
         aliases:
-          - lake.minio
+          - redpanda.minio
     volumes:
       - minio_data:/data
 
@@ -86,64 +36,138 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set myminio http://minio:9000 minioadmin minioadmin;
-      mc mb --ignore-existing myminio/lake;
-      mc anonymous set public myminio/lake;
+      mc mb --ignore-existing myminio/redpanda;
+      mc anonymous set public myminio/redpanda;
       echo 'Bucket created successfully';
       "
     networks:
       - lakehouse
 
-  # Tabular Iceberg REST catalog
-  catalog:
-    image: tabulario/iceberg-rest:latest
+  # PostgreSQL for Polaris metadata
+  postgres:
+    image: postgres:15-alpine
+    platform: linux/amd64
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: polaris
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lakehouse
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./resources/create-polaris-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+
+  # Apache Polaris Admin Tool - Bootstrap database schema
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:latest
+    platform: linux/amd64
+    restart: "no"
+    environment:
+      # Database connection - must match Polaris server
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/polaris
+      QUARKUS_DATASOURCE_USERNAME: polaris
+      QUARKUS_DATASOURCE_PASSWORD: polaris123
+    command: ["bootstrap", "-r", "POLARIS", "-c", "POLARIS,root,pass"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - lakehouse
+
+  # Apache Polaris REST Catalog server
+  polaris:
+    image: apache/polaris:latest
     platform: linux/amd64
     ports:
       - "8181:8181"
     environment:
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
-      - AWS_REGION=us-east-1
-      - CATALOG_WAREHOUSE=s3://lake/warehouse/
-      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
-      - CATALOG_S3_PATH-STYLE-ACCESS=true
+      # AWS/S3 configuration
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      # Database connection - Polaris with PostgreSQL
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/polaris
+      QUARKUS_DATASOURCE_USERNAME: polaris
+      QUARKUS_DATASOURCE_PASSWORD: polaris123
+      # Bootstrap credentials - inform server of bootstrapped realm
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,pass
     depends_on:
-      minio:
-        condition: service_healthy
+      polaris-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:8181/api/catalog/v1/config"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
     networks:
       - lakehouse
 
-  # Committer service (NDJSON -> Parquet -> Iceberg)
-  committer:
-    build:
-      context: ./committer
-      dockerfile: Dockerfile
+  # Redpanda broker with Iceberg integration
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.2.2
     platform: linux/amd64
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=2G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --default-log-level=info
     ports:
-      - "8088:8088"
-    environment:
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET: lake
-      MINIO_REGION: us-east-1
-      CATALOG_URI: http://catalog:8181
-      ICEBERG_WAREHOUSE: s3://lake/warehouse
-      ICEBERG_TABLE: analytics.trades_iceberg
-      PARQUET_TARGET_PREFIX: warehouse/analytics/trades_iceberg/data
-      PARQUET_ROW_GROUP: 50000
-      COMMITTER_PORT: 8088
-      POLL_INTERVAL: 10
+      - "19092:19092"
+      - "18081:18081"
+      - "18082:18082"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
     depends_on:
+      polaris:
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-      catalog:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+    networks:
+      - lakehouse
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+      - ./redpanda/redpanda.yaml:/etc/redpanda/.bootstrap.yaml
+
+  # Redpanda Console
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.5.2
+    platform: linux/amd64
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    depends_on:
+      redpanda:
+        condition: service_healthy
     networks:
       - lakehouse
 
@@ -163,33 +187,7 @@ services:
     profiles:
       - manual
 
-  # Redpanda Connect (Benthos)
-  connect:
-    image: docker.redpanda.com/redpandadata/connect:latest
-    platform: linux/amd64
-    command: ["-c", "/config/s3_stage_and_commit.yaml"]
-    volumes:
-      - ./connect:/config:ro
-    environment:
-      RP_BROKERS: redpanda:9092
-      RP_TOPIC_TRADES: trades
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET: lake
-      MINIO_REGION: us-east-1
-      COMMITTER_PORT: 8088
-    depends_on:
-      redpanda:
-        condition: service_healthy
-      committer:
-        condition: service_healthy
-    networks:
-      - lakehouse
-    profiles:
-      - manual
-
-  # DuckDB CLI with Web UI
+  # DuckDB CLI with Iceberg extension
   duckdb-cli:
     build:
       context: ./duckdb-ui
@@ -200,22 +198,20 @@ services:
       - "4213:4213"
     volumes:
       - ./duckdb:/workspace/duckdb:ro
+      - ./resources:/workspace/resources:ro
       - duckdb_data:/root/.duckdb
     environment:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET: lake
-      CATALOG_URI: http://catalog:8181
-      ICEBERG_WAREHOUSE: s3://lake/warehouse
-      ICEBERG_TABLE: analytics.trades_iceberg
-      BATCH_COUNT: 50000
-      STAGE_PREFIX: staging/trades
+      POLARIS_ENDPOINT: http://polaris:8181/api/catalog/
+      POLARIS_CLIENT_ID: root
+      POLARIS_CLIENT_SECRET: pass
+      POLARIS_WAREHOUSE: redpanda_catalog
     command:
       - /bin/sh
       - -c
       - |
-        # Install DuckDB extensions
         echo "Installing DuckDB extensions..."
         duckdb -c "INSTALL httpfs; INSTALL iceberg;"
         echo "✓ DuckDB extensions installed"
@@ -224,17 +220,17 @@ services:
         echo "=========================================="
         echo "DuckDB CLI container is ready"
         echo "Execute queries with:"
-        echo "  docker exec rp-e2e-nospark-duckdb-cli-1 duckdb [options]"
+        echo "  docker exec -it redpanda-iceberg-duckdb-duckdb-cli-1 duckdb"
         echo "=========================================="
         echo ""
 
         # Keep container alive
         tail -f /dev/null
     depends_on:
-      minio-init:
-        condition: service_completed_successfully
-      catalog:
-        condition: service_started
+      polaris:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
     networks:
       - lakehouse
 
@@ -244,4 +240,6 @@ networks:
 
 volumes:
   minio_data:
+  postgres_data:
+  redpanda_data:
   duckdb_data:

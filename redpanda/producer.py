@@ -34,13 +34,18 @@ def generate_trade(trade_index: int, base_time: datetime) -> Dict:
     ts_event = base_time + timedelta(seconds=trade_index)
     ts_event_str = ts_event.isoformat() + "Z"
 
+    # Add padding to defeat Parquet compression (for demo purposes)
+    # Generate 100 bytes of random data per record to ensure >1MB Parquet files
+    padding = ''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=100))
+
     return {
         "trade_id": trade_id,
         "symbol": symbol,
         "price": price,
         "qty": qty,
         "side": side,
-        "ts_event": ts_event_str
+        "ts_event": ts_event_str,
+        "notes": padding  # Padding field for testing
     }
 
 

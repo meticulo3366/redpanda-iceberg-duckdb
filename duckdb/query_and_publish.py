@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Query Iceberg table using DuckDB and publish results to Redpanda.
-This script demonstrates the complete round trip: Redpanda -> Iceberg -> Redpanda.
+Query Iceberg table using DuckDB REST catalog and publish results to Redpanda.
+This demonstrates the complete round trip: Redpanda Iceberg Topics → DuckDB → Redpanda.
 """
 
 import json
 import os
 import sys
+import subprocess
 from typing import List, Dict
 
 import duckdb
@@ -22,6 +23,37 @@ def get_env_or_exit(var_name: str, default: str = None) -> str:
     return value
 
 
+def get_polaris_token() -> str:
+    """Get OAuth2 token from Polaris."""
+    polaris_endpoint = get_env_or_exit("POLARIS_ENDPOINT", "http://polaris:8181")
+    client_id = get_env_or_exit("POLARIS_CLIENT_ID", "root")
+    client_secret = get_env_or_exit("POLARIS_CLIENT_SECRET", "pass")
+
+    print("Getting OAuth2 token from Polaris...")
+
+    try:
+        result = subprocess.run([
+            "curl", "-s", "-X", "POST",
+            f"{polaris_endpoint}/api/catalog/v1/oauth/tokens",
+            "-H", "Content-Type: application/x-www-form-urlencoded",
+            "-d", f"grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=PRINCIPAL_ROLE:ALL"
+        ], capture_output=True, text=True, check=True)
+
+        token_response = json.loads(result.stdout)
+        token = token_response.get("access_token")
+
+        if not token:
+            print("ERROR: No access token in response", file=sys.stderr)
+            sys.exit(1)
+
+        print("✓ Token obtained successfully")
+        return token
+
+    except Exception as e:
+        print(f"ERROR: Failed to get token: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def delivery_report(err, msg):
     """Kafka delivery callback."""
     if err is not None:
@@ -30,16 +62,10 @@ def delivery_report(err, msg):
         print(f"✓ Published to {msg.topic()} [{msg.partition()}] @ offset {msg.offset()}")
 
 
-def query_iceberg_with_duckdb() -> List[Dict]:
-    """Query Iceberg table using DuckDB and return aggregated results."""
+def query_iceberg_with_duckdb(token: str) -> List[Dict]:
+    """Query Iceberg table using DuckDB REST catalog and return aggregated results."""
 
-    # Get S3/MinIO configuration
-    minio_endpoint = get_env_or_exit("MINIO_ENDPOINT", "http://minio:9000")
-    minio_access_key = get_env_or_exit("MINIO_ACCESS_KEY", "minioadmin")
-    minio_secret_key = get_env_or_exit("MINIO_SECRET_KEY", "minioadmin")
-    minio_region = get_env_or_exit("MINIO_REGION", "us-east-1")
-
-    print("=== Querying Iceberg Table with DuckDB ===")
+    print("\n=== Querying Iceberg Table via REST Catalog ===")
 
     # Create DuckDB connection
     conn = duckdb.connect(":memory:")
@@ -50,14 +76,32 @@ def query_iceberg_with_duckdb() -> List[Dict]:
     conn.execute("LOAD httpfs")
     conn.execute("LOAD iceberg")
 
-    # Configure S3 access (strip http:// from endpoint for DuckDB)
-    endpoint = minio_endpoint.replace("http://", "").replace("https://", "")
-    conn.execute(f"SET s3_endpoint='{endpoint}'")
+    # Configure S3 access (MinIO)
+    conn.execute("SET s3_endpoint='minio:9000'")
     conn.execute("SET s3_url_style='path'")
     conn.execute("SET s3_use_ssl=false")
-    conn.execute(f"SET s3_access_key_id='{minio_access_key}'")
-    conn.execute(f"SET s3_secret_access_key='{minio_secret_key}'")
-    conn.execute(f"SET s3_region='{minio_region}'")
+    conn.execute("SET s3_access_key_id='minioadmin'")
+    conn.execute("SET s3_secret_access_key='minioadmin'")
+    conn.execute("SET s3_region='us-east-1'")
+
+    # Create secret for Iceberg REST catalog
+    conn.execute(f"""
+        CREATE OR REPLACE SECRET iceberg_secret (
+            TYPE ICEBERG,
+            TOKEN '{token}'
+        )
+    """)
+
+    # Attach Polaris catalog
+    conn.execute("""
+        ATTACH 'redpanda_catalog' AS iceberg_catalog (
+            TYPE ICEBERG,
+            SECRET iceberg_secret,
+            ENDPOINT 'http://polaris:8181/api/catalog/'
+        )
+    """)
+
+    print("✓ Connected to Polaris REST catalog")
 
     # Query Iceberg table for aggregated stats
     query = """
@@ -72,7 +116,7 @@ def query_iceberg_with_duckdb() -> List[Dict]:
         COUNT(CASE WHEN side = 'SELL' THEN 1 END) as sell_count,
         MIN(ts_event) as first_trade_time,
         MAX(ts_event) as last_trade_time
-    FROM read_parquet('s3://lake/warehouse/analytics/trades_iceberg/data/**/*.parquet')
+    FROM iceberg_catalog.redpanda.trades
     GROUP BY symbol
     ORDER BY total_volume DESC
     """
@@ -152,22 +196,25 @@ def main():
     topic = get_env_or_exit("RP_TOPIC_RESULTS", "trade_analytics")
 
     print("=" * 100)
-    print("DuckDB Iceberg Query -> Redpanda Publisher")
+    print("DuckDB Iceberg REST Catalog Query → Redpanda Publisher")
     print("=" * 100)
 
-    # Step 1: Query Iceberg table using DuckDB
-    records = query_iceberg_with_duckdb()
+    # Step 1: Get Polaris OAuth2 token
+    token = get_polaris_token()
+
+    # Step 2: Query Iceberg table using DuckDB REST catalog
+    records = query_iceberg_with_duckdb(token)
 
     if not records:
         print("WARNING: No data found in Iceberg table", file=sys.stderr)
         sys.exit(1)
 
-    # Step 2: Publish results to Redpanda
+    # Step 3: Publish results to Redpanda
     publish_to_redpanda(records, broker, topic)
 
     print("\n" + "=" * 100)
     print("✓ END-TO-END VERIFICATION COMPLETE")
-    print("✓ Data successfully flowed: Redpanda -> Iceberg -> DuckDB Query -> Redpanda")
+    print("✓ Data successfully flowed: Redpanda Iceberg Topics → DuckDB Query → Redpanda")
     print("=" * 100)
 
 

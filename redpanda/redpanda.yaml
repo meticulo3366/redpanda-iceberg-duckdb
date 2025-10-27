@@ -1,0 +1,32 @@
+# Iceberg configuration
+iceberg_enabled: true
+iceberg_catalog_type: rest
+iceberg_rest_catalog_endpoint: http://polaris:8181/api/catalog/
+iceberg_rest_catalog_oauth2_server_uri: http://polaris:8181/api/catalog/v1/oauth/tokens
+iceberg_rest_catalog_authentication_mode: oauth2
+iceberg_rest_catalog_client_id: root
+iceberg_rest_catalog_client_secret: pass
+iceberg_rest_catalog_warehouse: redpanda_catalog
+iceberg_rest_catalog_oauth2_scope: "PRINCIPAL_ROLE:ALL"
+iceberg_target_lag_ms: 10000
+iceberg_disable_snapshot_tagging: true
+
+# Cloud storage configuration
+cloud_storage_enabled: true
+cloud_storage_bucket: redpanda
+cloud_storage_api_endpoint: minio
+cloud_storage_api_endpoint_port: 9000
+cloud_storage_disable_tls: true
+cloud_storage_region: us-east-1
+cloud_storage_access_key: minioadmin
+cloud_storage_secret_key: minioadmin
+cloud_storage_url_style: path
+
+# Cloud storage timeout tuning
+cloud_storage_segment_upload_timeout_ms: 300000  # 5 minutes (default is much shorter)
+cloud_storage_manifest_upload_timeout_ms: 120000  # 2 minutes
+cloud_storage_max_connection_idle_time_ms: 300000  # 5 minutes
+cloud_storage_idle_timeout_ms: 60000  # 1 minute
+
+# Datalake flush threshold (minimum is 1MB)
+datalake_translator_flush_bytes: 1048576  # 1MB (minimum allowed value)

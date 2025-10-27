@@ -1,16 +1,16 @@
--- Verify Iceberg table via direct Parquet reads
--- Checks total count, distinct trade_id count, and timestamp range
+-- Verify Iceberg table via REST catalog
+-- Query directly from iceberg_catalog.redpanda namespace
 
-.print '=== Verifying Iceberg Table (Parquet Data Files) ==='
-
--- Read Iceberg data files directly (Parquet files in warehouse)
 SELECT
-    COUNT(*) AS total_records,
-    COUNT(DISTINCT trade_id) AS distinct_trade_ids,
-    MIN(ts_event) AS earliest_event,
-    MAX(ts_event) AS latest_event,
-    COUNT(DISTINCT symbol) AS distinct_symbols
-FROM read_parquet('s3://lake/warehouse/analytics/trades_iceberg/data/**/*.parquet');
+    'Iceberg Table Verification' as check_name,
+    COUNT(*) as record_count
+FROM iceberg_catalog.redpanda.trades;
 
-.print ''
-.print 'Iceberg table verification complete'
+SELECT
+    symbol,
+    COUNT(*) as trade_count,
+    ROUND(AVG(price), 2) as avg_price,
+    SUM(qty) as total_volume
+FROM iceberg_catalog.redpanda.trades
+GROUP BY symbol
+ORDER BY total_volume DESC;
