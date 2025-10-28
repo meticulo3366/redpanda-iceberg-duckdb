@@ -228,18 +228,6 @@ This project demonstrates a **simplified lakehouse architecture** using Redpanda
 
 ```mermaid
 graph LR
-    subgraph "❌ Traditional Approach (Complex)"
-        K1[Kafka] --> SP[Spark Jobs]
-        SP --> CS[Custom Committer]
-        CS --> IC1[Iceberg]
-        K1 --> CON[Connect/Benthos]
-        CON --> S31[S3]
-        CS --> S31
-        IC1 --> TAB[Tabular Catalog]
-        TAB --> META1[(Metadata)]
-        SP -.->|Requires| CLUSTER[Spark Cluster]
-        CON -.->|Config| YAML[Complex YAML]
-    end
 
     subgraph "✅ This Demo (Simplified)"
         RP[Redpanda<br/>Native Iceberg] --> IC2[Iceberg]
@@ -263,26 +251,17 @@ graph LR
 
 ### Component Comparison
 
-| Aspect | Traditional (7+ services) | This Demo (5 services) |
+| Aspect  | This Demo (5 services) |
 |--------|---------------------------|------------------------|
-| **Iceberg Integration** | Custom Python committer service | ✅ Native Redpanda feature |
-| **Data Movement** | Redpanda Connect + YAML config | ✅ Built-in (topic config) |
-| **Processing Engine** | Apache Spark cluster | ✅ Not needed |
-| **Catalog** | Tabular (proprietary) | ✅ Polaris (open-source) |
-| **Snapshot Creation** | Manual polling + conversion | ✅ Automatic (every 10s) |
-| **Complexity** | High (multiple moving parts) | ✅ Low (native integration) |
-| **Setup Time** | 30-60 minutes | ✅ 5-10 minutes |
+| **Iceberg Integration** |  Native Redpanda feature |
+| **Data Movement** |  Built-in (topic config) |
+| **Processing Engine** |  Not needed |
+| **Catalog** |  Polaris (open-source) |
+| **Snapshot Creation** |  Automatic (every 10s) |
+| **Complexity** |  Low (native integration) |
 
-### Key Simplifications
+### Stack Overview
 
-❌ **Removed Components:**
-- No Spark cluster or jobs
-- No custom committer service
-- No Redpanda Connect/Benthos
-- No complex YAML configurations
-- No Tabular catalog subscription
-
-✅ **Simplified Stack:**
 - **Redpanda** with native Iceberg Topics feature
 - **Apache Polaris** - Open-source Iceberg REST catalog
 - **PostgreSQL** - Polaris metadata storage
