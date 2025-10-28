@@ -238,27 +238,18 @@ graph LR
         DDB --> S32
     end
 
-    style K1 fill:#ffcccc
-    style SP fill:#ffcccc
-    style CS fill:#ffcccc
-    style CON fill:#ffcccc
-    style TAB fill:#ffcccc
-    style RP fill:#ccffcc
-    style IC2 fill:#ccffcc
-    style POL fill:#ccffcc
-    style DDB fill:#ccffcc
 ```
 
 ### Component Comparison
 
 | Aspect  | This Demo (5 services) |
-|--------|---------------------------|------------------------|
-| **Iceberg Integration** |  Native Redpanda feature |
-| **Data Movement** |  Built-in (topic config) |
-| **Processing Engine** |  Not needed |
-| **Catalog** |  Polaris (open-source) |
-| **Snapshot Creation** |  Automatic (every 10s) |
-| **Complexity** |  Low (native integration) |
+|--------|------------------------|
+| **Iceberg Integration** | ✅ Native Redpanda feature |
+| **Data Movement** | ✅ Built-in (topic config) |
+| **Processing Engine** | ✅ Not needed |
+| **Catalog** | ✅ Polaris (open-source) |
+| **Snapshot Creation** | ✅ Automatic (every 10s) |
+| **Complexity** | ✅ Low (native integration) |
 
 ### Stack Overview
 
